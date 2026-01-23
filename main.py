@@ -13,6 +13,7 @@ import yaml
 import os
 from tensorboard_log import Logger
 from processor import get_model, train_epoch, test_epoch 
+from utils import graph_reranking, GCNRefiner
 
 
 torch.multiprocessing.set_sharing_strategy('file_system')
@@ -56,7 +57,9 @@ if __name__ == "__main__":
 
     parser.add_argument('--parallel', default=None, help='Whether to used DataParallel for multi-gpu in one device')    
     parser.add_argument('--half_precision', default=None, help='Use of mixed precision') 
-    parser.add_argument('--mean_losses', default=None, help='Use of mixed precision') 
+    parser.add_argument('--mean_losses', default=None, help='Use of mixed precision')
+    parser.add_argument('--learn_graph', default=False, help='Define learn graph for re-ranking')
+    parser.add_argument('-re_rank', default=False, help='Define re-ranking')
     
     args = parser.parse_args()
 
@@ -147,7 +150,11 @@ if __name__ == "__main__":
         data_train = DataLoader(data_train, sampler=RandomIdentitySampler(data_train, data['BATCH_SIZE'], data['NUM_INSTANCES']), num_workers=data['num_workers_train'], batch_size = data['BATCH_SIZE'], collate_fn=train_collate_fn, pin_memory=True)
         data_q = DataLoader(data_q, batch_size=data['BATCH_SIZE'], shuffle=False, num_workers=data['num_workers_teste'])
         data_g = DataLoader(data_g, batch_size=data['BATCH_SIZE'], shuffle=False, num_workers=data['num_workers_teste'])
- 
+
+        print(f"Len of train: {len(data_train)}")
+        print(f"Len of query: {len(data_q)}")
+        print(f"Len of gallery: {len(data_g)}")
+    
     # Check if the GPU is available and select
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     print(f'Selected device: {device}')
@@ -157,6 +164,13 @@ if __name__ == "__main__":
     if data['parallel']:
         model = torch.nn.DataParallel(model, device_ids=[i for i in range(torch.cuda.device_count())])
         print("\n \n Parallel activated!\nDo not use this with LBS!\nIt may result in weird behaviour sometimes.")
+    
+    if args.learn_graph:
+        # Get length feature
+        input = torch.randn((32,3,256,256)).to(device)
+        preds, embs, ffs, output = model(input, torch.randint(0,19,(32,1)).long().to(device), torch.randint(0,7,(32,8)).long().to(device))
+        feature_dim = embs[0].shape[1]
+        gcn_model = GCNRefiner(feature_dim=feature_dim).to(device)
 
     ### Losses ###
     loss_fn = nn.CrossEntropyLoss(label_smoothing=data['label_smoothing'])
@@ -170,6 +184,14 @@ if __name__ == "__main__":
                             data['weight_decay'],
                             data['bias_lr_factor'],
                             data['momentum'])              #data['eps'])
+    if args.learn_graph:
+        optimizer.add_param_group({
+            'params': gcn_model.parameters(),
+            'lr': data['lr'],
+            'weight_decay': data['weight_decay']
+        })
+        print(f"Added GCN parameters to optimizer. Total param groups: {len(optimizer.param_groups)}")
+
     ### Schedule for the optimizer           
     if data['epoch_freeze_L1toL3'] == 0:                 
         scheduler = make_warmup_scheduler(data['sched_name'],
@@ -237,12 +259,22 @@ if __name__ == "__main__":
         if epoch >= data['epoch_freeze_L1toL3']-1:              
             scheduler.step()    
         ### Train Loop
-        train_loss, c_loss, t_loss, alpha_ce, beta_tri = train_epoch(model, device, data_train, loss_fn, metric_loss, optimizer, data, alpha_ce, beta_tri, logger, epoch, scheduler, scaler)
+        if args.learn_graph:
+            print(f"Training with GCN model")
+            train_loss, c_loss, t_loss, alpha_ce, beta_tri = train_epoch(model, device, data_train, loss_fn, metric_loss, optimizer, data, alpha_ce, beta_tri, logger, epoch, scheduler, scaler, gcn_model)
+        else:
+            print(f"Traditional training")
+            train_loss, c_loss, t_loss, alpha_ce, beta_tri = train_epoch(model, device, data_train, loss_fn, metric_loss, optimizer, data, alpha_ce, beta_tri, logger, epoch, scheduler, scaler)
+
         ###Evaluation
         if epoch%data['validation_period']==0 or epoch>=data['num_epochs']-15:
-            cmc, mAP = test_epoch(model, device, data_q, data_g, data['model_arch'], logger, epoch, remove_junk=True, scaler=scaler)
+            if args.learn_graph:
+                cmc, mAP = test_epoch(model, device, data_q, data_g, data['model_arch'], logger, epoch, remove_junk=True, scaler=scaler, gcn_model=gcn_model, re_rank=args.re_rank)
+                logger.save_model(model, gcn_model)
+            else:
+                cmc, mAP = test_epoch(model, device, data_q, data_g, data['model_arch'], logger, epoch, remove_junk=True, scaler=scaler, re_rank=args.re_rank)
+                logger.save_model(model)
             print('\n EPOCH {}/{} \t train loss {} \t Classification loss {} \t Triplet loss {} \t mAP {} \t CMC1 {} \t CMC5 {}'.format(epoch + 1, data['num_epochs'], train_loss, c_loss, t_loss,mAP, cmc[0], cmc[4]))
-            logger.save_model(model)
 
     print("Best mAP: ", np.max(logger.logscalars['Accuraccy/mAP']))
     print("Best CMC1: ", np.max(logger.logscalars['Accuraccy/CMC1']))

@@ -289,7 +289,8 @@ class CustomDataSet4Veri776(Dataset):
 
         img_name = os.path.join(self.root_dir,
                                 self.names[idx])
-        image = torchvision.io.read_image(img_name)
+        abs_path = os.path.abspath(img_name)
+        image = torchvision.io.read_image(abs_path)
         vid = np.int64(self.labels[idx])
         camid = np.int64(self.cams[idx].replace('c', ""))
 
@@ -329,8 +330,9 @@ class CustomDataSet4Veri776_withviewpont(Dataset):
         if is_train == True:
             for line in lines:
                 line = line.strip()
-                view = self.viewpoint_train[self.viewpoint_train.iloc[:, 0] == line]
-                if self.viewpoint_train[self.viewpoint_train.iloc[:, 0] == line].shape[0] ==0:
+                absolute_line = "VeRi/image_train/" + line
+                view = self.viewpoint_train[self.viewpoint_train.iloc[:, 0] == absolute_line]
+                if self.viewpoint_train[self.viewpoint_train.iloc[:, 0] == absolute_line].shape[0] ==0:
                     conta_missing_images += 1
                     continue
                 view = int(view.iloc[0, -1])
@@ -346,8 +348,9 @@ class CustomDataSet4Veri776_withviewpont(Dataset):
         else:
             for line in lines:
                 line = line.strip()
-                view = self.viewpoint_test[self.viewpoint_test.iloc[:, 0] == line]
-                if self.viewpoint_test[self.viewpoint_test.iloc[:, 0] == line].shape[0] == 0:
+                absolute_line = "VeRi/image_test/" + line
+                view = self.viewpoint_test[self.viewpoint_test.iloc[:, 0] == absolute_line]
+                if self.viewpoint_test[self.viewpoint_test.iloc[:, 0] == absolute_line].shape[0] == 0:
                     conta_missing_images += 1
                     continue
                 view = int(view.iloc[0, -1])

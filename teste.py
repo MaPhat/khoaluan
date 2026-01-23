@@ -12,7 +12,7 @@ from processor import get_model
 import torch.multiprocessing
 import os
 import yaml
-from utils import re_ranking
+from utils import re_ranking, graph_reranking
 #import cv2
 
 
@@ -74,7 +74,7 @@ def count_parameters(model): return sum(p.numel() for p in model.parameters() if
 #                             cv2.imwrite(outputDIR + 'mhsa_t_branch/' +str(count_imgs + i) + '.jpg', activ)
 #                     cnt += 1
 
-def test_epoch(model, device, dataloader_q, dataloader_g, model_arch, remove_junk=True, scaler=None, re_rank=False):
+def test_epoch(model, device, dataloader_q, dataloader_g, model_arch, remove_junk=True, scaler=None, re_rank=False, graph_re_rank=False):
     model.eval()
     re_escala = torchvision.transforms.Resize((256,256), antialias=True)
 
@@ -141,7 +141,10 @@ def test_epoch(model, device, dataloader_q, dataloader_g, model_arch, remove_jun
 
     qf = torch.cat(qf, dim=0)
     gf = torch.cat(gf, dim=0)
-    
+    q_camids = torch.cat(q_camids, dim=0).cpu().numpy()
+    g_camids = torch.cat(g_camids, dim=0).cpu().numpy()
+    q_vids = torch.cat(q_vids, dim=0).cpu().numpy()
+    g_vids = torch.cat(g_vids, dim=0).cpu().numpy()
     # with open(args.path_weights +'q_feats.npy', 'wb') as f:
     #     np.save(f, qf.cpu().numpy())
     # with open(args.path_weights +'g_feats.npy', 'wb') as f:
@@ -150,16 +153,13 @@ def test_epoch(model, device, dataloader_q, dataloader_g, model_arch, remove_jun
     m, n = qf.shape[0], gf.shape[0]   
     if re_rank:
         distmat = re_ranking(qf, gf, k1=80, k2=16, lambda_value=0.3)
+    elif graph_re_rank:
+        distmat = graph_reranking(qf, gf, q_camids, g_camids)
     else:
         distmat =  torch.pow(qf, 2).sum(dim=1, keepdim=True).expand(m, n) + \
                 torch.pow(gf, 2).sum(dim=1, keepdim=True).expand(n, m).t()
         distmat.addmm_(qf, gf.t(),beta=1, alpha=-2)
-        distmat = torch.sqrt(distmat).cpu().numpy()
-
-    q_camids = torch.cat(q_camids, dim=0).cpu().numpy()
-    g_camids = torch.cat(g_camids, dim=0).cpu().numpy()
-    q_vids = torch.cat(q_vids, dim=0).cpu().numpy()
-    g_vids = torch.cat(g_vids, dim=0).cpu().numpy()   
+        distmat = torch.sqrt(distmat).cpu().numpy()  
     
     # with open(args.path_weights +'distmat.npy', 'wb') as f:
     #     np.save(f, distmat)
@@ -168,7 +168,6 @@ def test_epoch(model, device, dataloader_q, dataloader_g, model_arch, remove_jun
     # with open(args.path_weights +'g_view.npy', 'wb') as f:
     #     np.save(f, g_view_id)
     del qf, gf
-
     
     cmc, mAP = eval_func(distmat, q_vids, g_vids, q_camids, g_camids, remove_junk=remove_junk)
     print(f'mAP = {mAP},  CMC1= {cmc[0]}, CMC5= {cmc[4]}')
@@ -187,6 +186,7 @@ if __name__ == "__main__":
     parser.add_argument('--model_arch', default=None, help='Model Architecture')
     parser.add_argument('--path_weights', default=None, help="Path to *.pth/*.pt loading weights file")
     parser.add_argument('--re_rank', action="store_true", help="Re-Rank")
+    parser.add_argument('--graph_re_rank', action="store_true", help='Graph Re-Rank')
     args = parser.parse_args()
 
     with open(args.path_weights + "config.yaml", "r") as stream:
@@ -240,7 +240,7 @@ if __name__ == "__main__":
     model = get_model(data, torch.device("cpu"))
 
     # One of the saved weights last.pt best_CMC.pt best_mAP.pt
-    path_weights = args.path_weights + 'best_mAP.pt'
+    path_weights = args.path_weights + 'last.pt'
 
     try:
         model.load_state_dict(torch.load(path_weights, map_location='cpu')) 
@@ -270,7 +270,7 @@ if __name__ == "__main__":
             data_g = CustomDataSet4VehicleID_Random(lines, data['ROOT_DIR'], is_train=False, mode="g", transform=teste_transform, teste=True)
             data_q = DataLoader(data_q, batch_size=data['BATCH_SIZE'], shuffle=False, num_workers=data['num_workers_teste'])
             data_g = DataLoader(data_g, batch_size=data['BATCH_SIZE'], shuffle=False, num_workers=data['num_workers_teste'])
-            cmc, mAP = test_epoch(model, device, data_q, data_g, data['model_arch'], remove_junk=True, scaler=scaler, re_rank=args.re_rank)
+            cmc, mAP = test_epoch(model, device, data_q, data_g, data['model_arch'], remove_junk=True, scaler=scaler, re_rank=args.re_rank, graph_re_rank=args.graph_re_rank)
             list_mAP.append(mAP)
             list_cmc1.append(cmc[0])
             list_cmc5.append(cmc[4])
@@ -283,7 +283,7 @@ if __name__ == "__main__":
         with open(args.path_weights +'result_cmc_l2_'+ str(l2) + '_mean_' + str(mean) +'.npy', 'wb') as f:
             np.save(f, cmc1)
     else:
-        cmc, mAP = test_epoch(model, device, data_q, data_g, data['model_arch'], remove_junk=True, scaler=scaler, re_rank=args.re_rank)
+        cmc, mAP = test_epoch(model, device, data_q, data_g, data['model_arch'], remove_junk=True, scaler=scaler, re_rank=args.re_rank, graph_re_rank=args.graph_re_rank)
         print(f'mAP = {mAP},  CMC1= {cmc[0]}, CMC5= {cmc[4]}')
         with open(args.path_weights +'result_map_l2_'+ str(l2) + '_mean_' + str(mean) +'.npy', 'wb') as f:
             np.save(f, mAP)

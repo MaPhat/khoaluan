@@ -5,6 +5,7 @@ from models.models import MBR_model
 from tqdm import tqdm
 import numpy as np
 from metrics.eval_reid import eval_func
+from utils import GCNRefiner, graph_reranking, re_ranking
 
 def get_lr(optimizer):
     for param_group in optimizer.param_groups:
@@ -99,8 +100,11 @@ def get_model(data, device):
 
 
 
-def train_epoch(model, device, dataloader, loss_fn, triplet_loss, optimizer, data, alpha_ce, beta_tri, logger, epoch, scheduler=None, scaler=False):
+def train_epoch(model, device, dataloader, loss_fn, triplet_loss, optimizer, data, alpha_ce, beta_tri, logger, epoch, scheduler=None, scaler=False, gcn_model=None):
     # Set train mode for both the encoder and the decoder
+    if gcn_model is not None:
+        gcn_model.train()
+
     model.train()
     train_loss = []
     ce_loss_log = []
@@ -129,6 +133,12 @@ def train_epoch(model, device, dataloader, loss_fn, triplet_loss, optimizer, dat
             with torch.autocast(device_type="cuda", dtype=torch.float16):
 
                 preds, embs, _, _ = model(image_batch, cam, view)
+                # print(len(embs))
+                # print(embs[0].shape)
+                if gcn_model is not None:
+                    global_feature = embs[0]
+                    A_g, A_c = build_graphs_for_batch(global_feature, cam)
+                    embs = [gcn_model(global_feature, A_g, A_c)]
                 loss = 0
                 #### Losses 
                 if type(preds) != list:
@@ -151,7 +161,10 @@ def train_epoch(model, device, dataloader, loss_fn, triplet_loss, optimizer, dat
                     loss = loss_ce + loss_t
         else:
             preds, embs, ffs, activations = model(image_batch, cam, view)
-
+            if gcn_model is not None:
+                    global_feature = embs[0]
+                    A_g, A_c = build_graphs_for_batch(global_feature, cam)
+                    embs = gcn_model(global_feature, A_g, A_c)
             loss = 0
             #### Losses 
             if type(preds) != list:
@@ -217,7 +230,9 @@ def train_epoch(model, device, dataloader, loss_fn, triplet_loss, optimizer, dat
 
 
 
-def test_epoch(model, device, dataloader_q, dataloader_g, model_arch, writer, epoch, remove_junk=True, scaler=False):
+def test_epoch(model, device, dataloader_q, dataloader_g, model_arch, writer, epoch, gcn_model=None, remove_junk=True, scaler=False, re_rank=False, graph_re_rank=False):
+    if gcn_model is not None:
+        gcn_model.eval()
     model.eval()
     ###needed lists
     qf = []
@@ -237,7 +252,11 @@ def test_epoch(model, device, dataloader_q, dataloader_g, model_arch, writer, ep
                     _, _, ffs, _ = model(image, cam_id, view_id)
             else:
                 _, _, ffs, _ = model(image, cam_id, view_id)
-          
+
+            if gcn_model is not None:
+                global_feature = ffs[0]
+                A_g, A_c = build_graphs_for_batch(global_feature, cam_id)
+                ffs = gcn_model(global_feature, A_g, A_c)
             end_vec = []
             for item in ffs:
                 end_vec.append(F.normalize(item))
@@ -273,14 +292,27 @@ def test_epoch(model, device, dataloader_q, dataloader_g, model_arch, writer, ep
 
     qf = torch.cat(qf, dim=0)
     gf = torch.cat(gf, dim=0)
-    m, n = qf.shape[0], gf.shape[0]   
-    distmat =  torch.pow(qf, 2).sum(dim=1, keepdim=True).expand(m, n) + \
-            torch.pow(gf, 2).sum(dim=1, keepdim=True).expand(n, m).t()
-    distmat.addmm_(qf, gf.t(),beta=1, alpha=-2)
-    distmat = torch.sqrt(distmat).cpu().numpy()
-
     q_camids = torch.cat(q_camids, dim=0).cpu().numpy()
     g_camids = torch.cat(g_camids, dim=0).cpu().numpy()
+    m, n = qf.shape[0], gf.shape[0]
+
+    if re_rank:
+        print("Original re-ranking")
+        distmat = re_ranking(qf, gf, k1=80, k2=16, lambda_value=0.3)
+    elif graph_re_rank:
+        if gcn_model is not None:
+            print(f"Learned graph re-ranking")
+            distmat = graph_reranking(qf, gf, q_camids, g_camids, learn_based=True, gcn_model=gcn_model)
+        else:
+            print(f"Graph re-ranking")
+            distmat = graph_reranking(qf, gf, q_camids, g_camids)
+    else:
+        print(f"None re-ranking")
+        distmat =  torch.pow(qf, 2).sum(dim=1, keepdim=True).expand(m, n) + \
+                torch.pow(gf, 2).sum(dim=1, keepdim=True).expand(n, m).t()
+        distmat.addmm_(qf, gf.t(),beta=1, alpha=-2)
+        distmat = torch.sqrt(distmat).cpu().numpy()
+
     q_vids = torch.cat(q_vids, dim=0).cpu().numpy()
     g_vids = torch.cat(g_vids, dim=0).cpu().numpy()   
     
@@ -291,3 +323,35 @@ def test_epoch(model, device, dataloader_q, dataloader_g, model_arch, writer, ep
     writer.write_scalars({"Accuraccy/CMC1": cmc[0], "Accuraccy/mAP": mAP}, epoch)
 
     return cmc, mAP
+
+def build_graphs_for_batch(feat, camids, k=20, gamma=2.0):
+    """
+    Xây dựng đồ thị động cho một Batch huấn luyện.
+    feat: (N, D) - Đặc trưng trích xuất từ Backbone
+    camids: (N,) - ID camera của từng ảnh trong batch
+    k: Số lượng lân cận gần nhất
+    """
+    # feat = torch.Tensor(feat)
+    N = feat.size(0)
+    device = feat.device
+
+    dist_mat = torch.cdist(feat, feat, p=2)
+
+    _, nn_idx = torch.topk(dist_mat, k=k, largest=False)
+    
+    A_g = torch.zeros(N, N, device=device)
+    weights = torch.exp(-dist_mat / gamma)
+    A_g.scatter_(1, nn_idx, weights.gather(1, nn_idx))
+
+    camids = camids.to(device)
+    camids = camids.view(-1, 1)
+    mask_cross = (camids != camids.T).float()
+    
+    A_c = A_g * mask_cross
+
+    def normalize(A):
+        row_sum = A.sum(1, keepdim=True)
+        A_norm = A / (row_sum + 1e-6)
+        return A_norm
+
+    return normalize(A_g), normalize(A_c)

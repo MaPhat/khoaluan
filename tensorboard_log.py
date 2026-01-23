@@ -49,13 +49,15 @@ class Logger(object):
         self.writer.flush()
         self.writer.close()
 
-    def save_model(self, model):
+    def save_model(self, model, gcn_model=None):
         if len(self.logscalars['Accuraccy/mAP']) > 1:
             if self.logscalars['Accuraccy/mAP'][-1] >= np.max(self.logscalars['Accuraccy/mAP'][:-1]):
                 torch.save(model.state_dict(), self.savepath  + '/' + 'best_mAP' +'.pt')
             if self.logscalars['Accuraccy/CMC1'][-1] >= np.max(self.logscalars['Accuraccy/CMC1'][:-1]):
                 torch.save(model.state_dict(), self.savepath  + '/' + 'best_CMC' +'.pt')
         torch.save(model.state_dict(), self.savepath  + '/' + 'last' +'.pt')
+        if gcn_model is not None:
+            torch.save(gcn_model.state_dict(), self.savepath  + '/' + 'gcn_model' +'.pt')
 
     def write_embeddings(self, features, labels, images, epoch, tag='default'):
         #if self.logscalars['Accuraccy/mAP'][-1] > np.max(self.logscalars['Accuraccy/mAP']):

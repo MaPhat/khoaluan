@@ -43,7 +43,7 @@ pretrain_ongroups: True
 
 # 
 ##DATA
-ROOT_DIR: /mnt/DATADISK/Datasets/vehicle/VERIWILD/images/
+ROOT_DIR: ./Veri776/VeRi
 BATCH_SIZE: 48 #48
 NUM_INSTANCES: 8 #8
 num_workers_train: 8 #8
@@ -62,15 +62,15 @@ p_rerase: 0.5
 dataset: Veri776 #Veri776
 
 n_classes: 575 #30671 #770
-query_dir: /home/eurico/VeRi/image_query/ #/mnt/DATADISK/Datasets/vehicle/VeRi/image_query/ #
-teste_dir: /home/eurico/VeRi/image_test/  #/mnt/DATADISK/Datasets/vehicle/VeRi/image_test/ #
-train_dir: /home/eurico/VeRi/image_train/ #/mnt/DATADISK/Datasets/vehicle/VeRi/image_train/ #
-query_list_file: /home/eurico/VeRi/name_query.txt
-gallery_list_file: /home/eurico/VeRi/name_test.txt
-train_list_file: /home/eurico/VeRi/name_train.txt
+query_dir: ..\Veri776\VeRi\image_query
+teste_dir: ..\Veri776\VeRi\image_test
+train_dir: ..\Veri776\VeRi\image_train
+query_list_file: ..\Veri776\VeRi\name_query.txt
+gallery_list_file: ..\Veri776\VeRi\name_test.txt
+train_list_file: ..\Veri776\VeRi\name_train.txt
 
-test_keypoint: /home/eurico/VeRi/keypoint_orient_test.txt
-train_keypoint: /home/eurico/VeRi/keypoint_orient_train.txt
+test_keypoint: ..\Veri776\VeRi\keypoint_test.txt
+train_keypoint: ..\Veri776\VeRi\keypoint_train.txt
 
 ### Define an optimizer settings
 optimizer: Adam #Adam SGD
@@ -82,7 +82,7 @@ momentum: 0.9
 ###scheduler settings
 sched_name: Warm_MultiStep
 min_lr: 7.75e-5
-num_epochs: 130
+num_epochs: 1
 milestones: [40, 70, 100]
 gamma: 0.1
 warmup_factor: 0.0
