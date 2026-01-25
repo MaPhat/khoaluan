@@ -306,6 +306,7 @@ def graph_reranking(probFea, galFea, q_camids, g_camids, k=20, gamma=0.5, alpha=
     Returns:
         refined_features: Tensor (N, D) - đặc trưng đã làm sạch
     """
+    if k is None: k = 20
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     q_camids = safe_to_tensor(q_camids, device=device)
     g_camids = safe_to_tensor(g_camids, device=device)
@@ -359,15 +360,15 @@ class GCNRefiner(nn.Module):
     def forward(self, features, A_global_norm, A_cross_norm):
         alpha = torch.clamp(self.alpha, 0.0, 1.0)
 
-        support = alpha * torch.mm(A_global_norm, features) + \
-                  (1 - alpha) * torch.mm(A_cross_norm, features)
+        support = alpha * torch.mm(A_global_norm.to(features.dtype), features) + \
+                  (1 - alpha) * torch.mm(A_cross_norm.to(features.dtype), features)
 
-        output_gcn = torch.mm(support, self.W)
+        output_gcn = torch.mm(support, self.W.to(support.dtype))
 
-        output_gcn = self.bn(output_gcn)
+        output_gcn = self.bn(output_gcn.float())
         output_gcn = self.relu(output_gcn)
 
-        final_output = features + output_gcn
+        final_output = features + output_gcn.to(features.dtype)
         
         return final_output
     

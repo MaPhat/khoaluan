@@ -256,7 +256,7 @@ def test_epoch(model, device, dataloader_q, dataloader_g, model_arch, writer, ep
             if gcn_model is not None:
                 global_feature = ffs[0]
                 A_g, A_c = build_graphs_for_batch(global_feature, cam_id)
-                ffs = gcn_model(global_feature, A_g, A_c)
+                ffs = [gcn_model(global_feature, A_g, A_c)]
             end_vec = []
             for item in ffs:
                 end_vec.append(F.normalize(item))
@@ -283,6 +283,10 @@ def test_epoch(model, device, dataloader_q, dataloader_g, model_arch, writer, ep
                     _, _, ffs, _ = model(image, cam_id, view_id)
 
             end_vec = []
+            if gcn_model is not None:
+                global_feature = ffs[0]
+                A_g, A_c = build_graphs_for_batch(global_feature, cam_id)
+                ffs = [gcn_model(global_feature, A_g, A_c)]
             for item in ffs:
                 end_vec.append(F.normalize(item))
             gf.append(torch.cat(end_vec, 1))
@@ -335,13 +339,16 @@ def build_graphs_for_batch(feat, camids, k=20, gamma=2.0):
     N = feat.size(0)
     device = feat.device
 
-    dist_mat = torch.cdist(feat, feat, p=2)
+    dist_mat = torch.cdist(feat.float(), feat.float(), p=2)
 
-    _, nn_idx = torch.topk(dist_mat, k=k, largest=False)
+    curr_k = min(k, N)
+    _, nn_idx = torch.topk(dist_mat, k=curr_k, largest=False)
     
     A_g = torch.zeros(N, N, device=device)
     weights = torch.exp(-dist_mat / gamma)
-    A_g.scatter_(1, nn_idx, weights.gather(1, nn_idx))
+
+    src_values = weights.gather(1, nn_idx)
+    A_g.scatter_(1, nn_idx, src_values.to(A_g.dtype))
 
     camids = camids.to(device)
     camids = camids.view(-1, 1)
