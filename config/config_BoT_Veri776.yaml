@@ -82,7 +82,7 @@ momentum: 0.9
 ###scheduler settings
 sched_name: Warm_MultiStep
 min_lr: 7.75e-5
-num_epochs: 3
+num_epochs: 5
 milestones: [40, 70, 100]
 gamma: 0.1
 warmup_factor: 0.0

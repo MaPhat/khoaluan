@@ -104,6 +104,10 @@ def train_epoch(model, device, dataloader, loss_fn, triplet_loss, optimizer, dat
     # Set train mode for both the encoder and the decoder
     if gcn_model is not None:
         gcn_model.train()
+        # Store initial weight for comparison
+        if epoch == 0:
+            initial_w_norm = gcn_model.W.data.norm().item()
+            print(f"==> GCN Initial W norm: {initial_w_norm:.4f}")
 
     model.train()
     train_loss = []
@@ -136,9 +140,13 @@ def train_epoch(model, device, dataloader, loss_fn, triplet_loss, optimizer, dat
                 # print(len(embs))
                 # print(embs[0].shape)
                 if gcn_model is not None:
+                    from utils import normalize_adj
                     global_feature = embs[0]
                     A_g, A_c = build_graphs_for_batch(global_feature, cam)
-                    embs = [gcn_model(global_feature, A_g, A_c)]
+                    A_g_norm = normalize_adj(A_g)
+                    A_c_norm = normalize_adj(A_c)
+                    refined_global = gcn_model(global_feature, A_g_norm, A_c_norm)
+                    embs = [refined_global]
                 loss = 0
                 #### Losses 
                 if type(preds) != list:
@@ -162,27 +170,30 @@ def train_epoch(model, device, dataloader, loss_fn, triplet_loss, optimizer, dat
         else:
             preds, embs, ffs, activations = model(image_batch, cam, view)
             if gcn_model is not None:
-                    global_feature = embs[0]
+                    from utils import normalize_adj
+                    global_feature = ffs[0]
                     A_g, A_c = build_graphs_for_batch(global_feature, cam)
-                    embs = gcn_model(global_feature, A_g, A_c)
+                    A_g_norm = normalize_adj(A_g)
+                    A_c_norm = normalize_adj(A_c)
+                    refined_global = gcn_model(global_feature, A_g_norm, A_c_norm)
+                    ffs = [refined_global]
             loss = 0
             #### Losses 
             if type(preds) != list:
                 preds = [preds]
-                embs = [embs]
+                ffs = [ffs]
             for i, item in enumerate(preds):
                 if i%2==0 or "aseline" in model_arch or "R50" in model_arch:
                     loss_ce += alpha_ce * loss_fn(item, label)
                 else:
                     loss_ce += gamma_ce * loss_fn(item, label)
-            for i, item in enumerate(embs):
+            for i, item in enumerate(ffs):
                 if i%2==0 or "aseline" in model_arch or "R50" in model_arch:
                     loss_t += beta_tri * triplet_loss(item, label)
                 else:
                     loss_t += gamma_t * triplet_loss(item, label)
-
             if data['mean_losses']:
-                loss = loss_ce/len(preds) + loss_t/len(embs)
+                loss = loss_ce/len(preds) + loss_t/len(ffs)
             else:
                 loss = loss_ce + loss_t
 
@@ -226,6 +237,11 @@ def train_epoch(model, device, dataloader, loss_fn, triplet_loss, optimizer, dat
 
     print('\nTrain ACC (%): ', acc_v / n_images, "\n")
     
+    # Log GCN stats if using GCN
+    if gcn_model is not None:
+        w_grad_norm = gcn_model.W.grad.norm().item() if gcn_model.W.grad is not None else 0.0
+        print(f"==> GCN W grad norm: {w_grad_norm:.6f} | W norm: {gcn_model.W.data.norm().item():.4f} | alpha: {gcn_model.alpha.item():.4f}\n")
+    
     return np.mean(train_loss), np.mean(ce_loss_log), np.mean(triplet_loss_log), alpha_ce, beta_tri
 
 
@@ -254,9 +270,13 @@ def test_epoch(model, device, dataloader_q, dataloader_g, model_arch, writer, ep
                 _, _, ffs, _ = model(image, cam_id, view_id)
 
             if gcn_model is not None:
+                from utils import normalize_adj
                 global_feature = ffs[0]
                 A_g, A_c = build_graphs_for_batch(global_feature, cam_id)
-                ffs = [gcn_model(global_feature, A_g, A_c)]
+                A_g_norm = normalize_adj(A_g)
+                A_c_norm = normalize_adj(A_c)
+                refined_global = gcn_model(global_feature, A_g_norm, A_c_norm)
+                ffs = [refined_global]
             end_vec = []
             for item in ffs:
                 end_vec.append(F.normalize(item))
@@ -284,13 +304,17 @@ def test_epoch(model, device, dataloader_q, dataloader_g, model_arch, writer, ep
 
             end_vec = []
             if gcn_model is not None:
+                from utils import normalize_adj
                 global_feature = ffs[0]
                 A_g, A_c = build_graphs_for_batch(global_feature, cam_id)
-                ffs = [gcn_model(global_feature, A_g, A_c)]
+                A_g_norm = normalize_adj(A_g)
+                A_c_norm = normalize_adj(A_c)
+                refined_global = gcn_model(global_feature, A_g_norm, A_c_norm)
+                ffs = [refined_global]
             for item in ffs:
                 end_vec.append(F.normalize(item))
             gf.append(torch.cat(end_vec, 1))
-            g_vids.append(q_id)
+            g_vids.append(q_id)  # Variable name is q_id but it's actually gallery ID from dataloader_g
             g_camids.append(cam_id)
         del g_images
 

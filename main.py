@@ -14,7 +14,7 @@ import os
 from tensorboard_log import Logger
 from processor import get_model, train_epoch, test_epoch 
 from utils import graph_reranking, GCNRefiner
-
+from early_stopping import EarlyStopping
 
 torch.multiprocessing.set_sharing_strategy('file_system')
 
@@ -35,6 +35,7 @@ def set_seed(seed):
 
 if __name__ == "__main__":
 
+    early_stopping = EarlyStopping(patience=5, delta=0)
     
     parser = argparse.ArgumentParser(description='ReID model trainer')
     parser.add_argument('--config', default=None, help='Config Path')
@@ -59,7 +60,7 @@ if __name__ == "__main__":
     parser.add_argument('--half_precision', default=None, help='Use of mixed precision') 
     parser.add_argument('--mean_losses', default=None, help='Use of mixed precision')
     parser.add_argument('--learn_graph', default=False, help='Define learn graph for re-ranking')
-    parser.add_argument('-re_rank', default=False, help='Define re-ranking')
+    parser.add_argument('--re_rank', default=False, help='Define re-ranking')
     
     args = parser.parse_args()
 
@@ -164,13 +165,21 @@ if __name__ == "__main__":
     if data['parallel']:
         model = torch.nn.DataParallel(model, device_ids=[i for i in range(torch.cuda.device_count())])
         print("\n \n Parallel activated!\nDo not use this with LBS!\nIt may result in weird behaviour sometimes.")
-    
+    ### Initiate a Logger with TensorBoard to store Scalars, Embeddings and the weights of the model
+    logger = Logger(data)
     if args.learn_graph:
         # Get length feature
         input = torch.randn((32,3,256,256)).to(device)
         preds, embs, ffs, output = model(input, torch.randint(0,19,(32,1)).long().to(device), torch.randint(0,7,(32,8)).long().to(device))
         feature_dim = embs[0].shape[1]
         gcn_model = GCNRefiner(feature_dim=feature_dim).to(device)
+        print(f"\n==> GCN Model created with feature_dim={feature_dim}")
+        print(f"==> GCN trainable parameters: {count_parameters(gcn_model)}")
+        
+        # Try to load existing GCN checkpoint if available
+        if os.path.exists(logger.savepath + '/gcn_model.pt'):
+            gcn_model.load_param(logger.savepath + '/gcn_model.pt')
+            print(f"==> Loaded GCN checkpoint from {logger.savepath}/gcn_model.pt")
 
     ### Losses ###
     loss_fn = nn.CrossEntropyLoss(label_smoothing=data['label_smoothing'])
@@ -185,12 +194,15 @@ if __name__ == "__main__":
                             data['bias_lr_factor'],
                             data['momentum'])              #data['eps'])
     if args.learn_graph:
+        # Use much smaller LR for GCN (10x smaller)
+        gcn_lr = data['lr'] * 0.1
         optimizer.add_param_group({
             'params': gcn_model.parameters(),
-            'lr': data['lr'],
+            'lr': gcn_lr,
             'weight_decay': data['weight_decay']
         })
-        print(f"Added GCN parameters to optimizer. Total param groups: {len(optimizer.param_groups)}")
+        print(f"Added GCN parameters to optimizer with LR={gcn_lr:.6f} (10x smaller)")
+        print(f"Total param groups: {len(optimizer.param_groups)}")
 
     ### Schedule for the optimizer           
     if data['epoch_freeze_L1toL3'] == 0:                 
@@ -214,9 +226,6 @@ if __name__ == "__main__":
     else:
         scaler=False
 
-    ### Initiate a Logger with TensorBoard to store Scalars, Embeddings and the weights of the model
-    logger = Logger(data)
-
     ##freeze backbone at warmupup epochs up to data['warmup_iters'] 
     if data['freeze_backbone_warmup']:
         for param in model.modelup2L3.parameters():
@@ -231,7 +240,10 @@ if __name__ == "__main__":
   
 
     ## Training Loop
-    for epoch in tqdm(range(data['num_epochs'])):
+    for epoch in range(data['num_epochs']):
+        print(f"\n{'='*50}")
+        print(f"Epoch [{epoch + 1}/{data['num_epochs']}]")
+        print(f"{'='*50}")
         ##unfreeze backbone
         if epoch == data['warmup_iters'] -1: 
             for param in model.modelup2L3.parameters():
@@ -260,21 +272,26 @@ if __name__ == "__main__":
             scheduler.step()    
         ### Train Loop
         if args.learn_graph:
-            print(f"Training with GCN model")
+            print(f"==> Training with GCN | alpha={gcn_model.alpha.item():.4f} | LR={optimizer.param_groups[-1]['lr']:.6f}")
             train_loss, c_loss, t_loss, alpha_ce, beta_tri = train_epoch(model, device, data_train, loss_fn, metric_loss, optimizer, data, alpha_ce, beta_tri, logger, epoch, scheduler, scaler, gcn_model)
         else:
             print(f"Traditional training")
             train_loss, c_loss, t_loss, alpha_ce, beta_tri = train_epoch(model, device, data_train, loss_fn, metric_loss, optimizer, data, alpha_ce, beta_tri, logger, epoch, scheduler, scaler)
 
         ###Evaluation
-        if epoch%data['validation_period']==0 or epoch>=data['num_epochs']-15:
-            if args.learn_graph:
-                cmc, mAP = test_epoch(model, device, data_q, data_g, data['model_arch'], logger, epoch, remove_junk=True, scaler=scaler, gcn_model=gcn_model, re_rank=args.re_rank)
-                logger.save_model(model, gcn_model)
-            else:
-                cmc, mAP = test_epoch(model, device, data_q, data_g, data['model_arch'], logger, epoch, remove_junk=True, scaler=scaler, re_rank=args.re_rank)
-                logger.save_model(model)
-            print('\n EPOCH {}/{} \t train loss {} \t Classification loss {} \t Triplet loss {} \t mAP {} \t CMC1 {} \t CMC5 {}'.format(epoch + 1, data['num_epochs'], train_loss, c_loss, t_loss,mAP, cmc[0], cmc[4]))
+        # if epoch%data['validation_period']==0 or epoch>=data['num_epochs']-15:
+        if args.learn_graph:
+            cmc, mAP = test_epoch(model, device, data_q, data_g, data['model_arch'], logger, epoch, remove_junk=True, scaler=scaler, gcn_model=gcn_model, re_rank=args.re_rank)
+            logger.save_model(model, gcn_model)
+        else:
+            cmc, mAP = test_epoch(model, device, data_q, data_g, data['model_arch'], logger, epoch, remove_junk=True, scaler=scaler, re_rank=args.re_rank)
+            logger.save_model(model)
+        print(f"mAP: {mAP}, CMC1: {cmc[0]}")
+        early_stopping(train_loss, model)
+        if early_stopping.early_stop:
+            print("Early stopping")
+            break
+        print('\n EPOCH {}/{} \t train loss {} \t Classification loss {} \t Triplet loss {} \t mAP {} \t CMC1 {} \t CMC5 {}'.format(epoch + 1, data['num_epochs'], train_loss, c_loss, t_loss,mAP, cmc[0], cmc[4]))
 
     print("Best mAP: ", np.max(logger.logscalars['Accuraccy/mAP']))
     print("Best CMC1: ", np.max(logger.logscalars['Accuraccy/CMC1']))

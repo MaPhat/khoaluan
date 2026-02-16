@@ -272,8 +272,11 @@ def normalize_adj(adj_matrix):
     adj_matrix_hat = adj_matrix + identity_matrix
 
     D = adj_matrix_hat.sum(dim=1)
+    # Add epsilon to avoid division by zero
+    D = D + 1e-12
     d_inv_sqrt = torch.pow(D, -0.5)
-    d_inv_sqrt[torch.isinf(d_inv_sqrt)] = 0.0
+    # Handle any inf or nan values
+    d_inv_sqrt = torch.where(torch.isfinite(d_inv_sqrt), d_inv_sqrt, torch.zeros_like(d_inv_sqrt))
     d_mat_inv_sqrt = torch.diag(d_inv_sqrt)
 
     return d_mat_inv_sqrt @ adj_matrix_hat @ d_mat_inv_sqrt
@@ -318,9 +321,11 @@ def graph_reranking(probFea, galFea, q_camids, g_camids, k=20, gamma=0.5, alpha=
     A_cross_norm = normalize_adj(A_cross)
     
     features = (torch.cat([probFea, galFea]).to(device)).float()
-    if learn_based and gcn_model is not None:
+    if gcn_model is not None:
+        print("Using GCN model for graph re-ranking")
+        gcn_model.eval()
         gcn_model = gcn_model.to(device)
-        global_dim = gcn_model.W.shape[0] # Lấy kích thước của Global (768)
+        global_dim = gcn_model.W.shape[0]
 
         if features.shape[1] > global_dim:
             feat_global = features[:, :global_dim] 
@@ -331,13 +336,14 @@ def graph_reranking(probFea, galFea, q_camids, g_camids, k=20, gamma=0.5, alpha=
             feat_global_refined = F.normalize(feat_global_refined, p=2, dim=1)        
             feat_local = F.normalize(feat_local, p=2, dim=1) 
 
-            features = torch.cat((feat_global_refined, feat_local), dim=1)
+            refined_features = torch.cat((feat_global_refined, feat_local), dim=1)
         else:
-            features = torch.mm(features, gcn_model.W)
-            features = F.relu(features)
-
-    refined_features = alpha * torch.mm(A_global_norm, features) + \
-                       (1 - alpha) * torch.mm(A_cross_norm, features)
+            refined_features = gcn_model(features, A_global_norm, A_cross_norm)
+            refined_features = F.normalize(refined_features, p=2, dim=1)
+    else:
+        # Traditional graph propagation without learned GCN
+        refined_features = alpha * torch.mm(A_global_norm, features) + \
+                           (1 - alpha) * torch.mm(A_cross_norm, features)
     
     num_query = probFea.size(0)
     refined_prob = refined_features[:num_query]
@@ -358,17 +364,22 @@ class GCNRefiner(nn.Module):
         self.relu = nn.ReLU()
 
     def forward(self, features, A_global_norm, A_cross_norm):
+        # Ensure all inputs are float32 for stability
+        features = features.float()
+        A_global_norm = A_global_norm.float()
+        A_cross_norm = A_cross_norm.float()
+        
         alpha = torch.clamp(self.alpha, 0.0, 1.0)
 
-        support = alpha * torch.mm(A_global_norm.to(features.dtype), features) + \
-                  (1 - alpha) * torch.mm(A_cross_norm.to(features.dtype), features)
+        support = alpha * torch.mm(A_global_norm, features) + \
+                  (1 - alpha) * torch.mm(A_cross_norm, features)
 
-        output_gcn = torch.mm(support, self.W.to(support.dtype))
+        output_gcn = torch.mm(support, self.W)
 
-        output_gcn = self.bn(output_gcn.float())
+        output_gcn = self.bn(output_gcn)
         output_gcn = self.relu(output_gcn)
 
-        final_output = features + output_gcn.to(features.dtype)
+        final_output = features + output_gcn
         
         return final_output
     
