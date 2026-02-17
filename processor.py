@@ -125,7 +125,7 @@ def train_epoch(model, device, dataloader, loss_fn, triplet_loss, optimizer, dat
     n_images = 0
     acc_v = 0
     stepcount = 0
-    for image_batch, label, cam, view in tqdm(dataloader, desc='Epoch ' + str(epoch+1) +' (%)' , bar_format='{l_bar}{bar:20}{r_bar}'): 
+    for image_batch, label, cam, view in tqdm(dataloader, desc='Epoch ' + str(epoch+1) +' (%)'): 
         # Move tensor to the proper device
         loss_ce = 0
         loss_t = 0
@@ -136,7 +136,7 @@ def train_epoch(model, device, dataloader, loss_fn, triplet_loss, optimizer, dat
         if scaler:
             with torch.autocast(device_type="cuda", dtype=torch.float16):
 
-                preds, embs, _, _ = model(image_batch, cam, view)
+                preds, embs, ffs, activations = model(image_batch, cam, view)
                 # print(len(embs))
                 # print(embs[0].shape)
                 if gcn_model is not None:
@@ -151,20 +151,20 @@ def train_epoch(model, device, dataloader, loss_fn, triplet_loss, optimizer, dat
                 #### Losses 
                 if type(preds) != list:
                     preds = [preds]
-                    embs = [embs]
+                    ffs = [ffs]
                 for i, item in enumerate(preds):
                     if i%2==0 or "aseline" in model_arch or "R50" in model_arch:
                         loss_ce += alpha_ce * loss_fn(item, label)
                     else:
                         loss_ce += gamma_ce * loss_fn(item, label)
-                for i, item in enumerate(embs):
+                for i, item in enumerate(ffs):
                     if i%2==0 or "aseline" in model_arch or "R50" in model_arch:
                         loss_t += beta_tri * triplet_loss(item, label)
                     else:
                         loss_t += gamma_t * triplet_loss(item, label)
 
                 if data['mean_losses']:
-                    loss = loss_ce/len(preds) + loss_t/len(embs)
+                    loss = loss_ce/len(preds) + loss_t/len(ffs)
                 else:
                     loss = loss_ce + loss_t
         else:
